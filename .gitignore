@@ -32,6 +32,7 @@ agent_payload.json
 dags_backup_*/
 docker-compose.backup.yaml
 docker-compose-original.yaml
+docker-compose.before-mra-dag.yaml
 
 # Notebook temporary files
 .ipynb_checkpoints/
