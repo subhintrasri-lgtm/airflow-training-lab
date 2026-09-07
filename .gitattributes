@@ -1,0 +1,28 @@
+# Normalize every text file to LF in the repository and in the working tree.
+# Fixes the CRLF churn that made `git diff` show 1,325 fake changes (7 Sep 2026).
+* text=auto eol=lf
+
+# Explicit text types
+*.py       text eol=lf
+*.yaml     text eol=lf
+*.yml      text eol=lf
+*.json     text eol=lf
+*.md       text eol=lf
+*.csv      text eol=lf
+*.ipynb    text eol=lf
+*.cfg      text eol=lf
+*.txt      text eol=lf
+Dockerfile text eol=lf
+.env*      text eol=lf
+
+# Binary - git must never rewrite these
+*.xlsb    binary
+*.xlsx    binary
+*.xls     binary
+*.parquet binary
+*.zip     binary
+*.png     binary
+*.jpg     binary
+*.pptx    binary
+*.docx    binary
+*.pdf     binary
