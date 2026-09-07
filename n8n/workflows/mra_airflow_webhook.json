@@ -134,7 +134,8 @@
       "position": [
         160,
         -240
-      ]
+      ],
+      "onError": "continueErrorOutput"
     },
     {
       "parameters": {
@@ -156,7 +157,10 @@
           "id": "pb7uDAfJLLv515zd",
           "name": "Google Gemini(PaLM) Api account"
         }
-      }
+      },
+      "retryOnFail": true,
+      "maxTries": 5,
+      "waitBetweenTries": 5000
     },
     {
       "parameters": {
@@ -173,7 +177,7 @@
     },
     {
       "parameters": {
-        "jsCode": "const data = $input.first().json;\nconst rows = Array.isArray(data.payload?.aggregates) ? data.payload.aggregates : [];\nconst valid = rows.filter(r => Number.isFinite(Number(r.completion_rate)));\nconst worst = [...valid].sort((a,b) => Number(a.completion_rate) - Number(b.completion_rate)).slice(0, 5);\nconst recommendations = worst.map((r, index) => ({\n  priority: index + 1,\n  role: r.Role,\n  period: r['Year-Month'],\n  dimension: r.QDimension ?? 'ไม่ระบุ',\n  completion_rate: Number(Number(r.completion_rate).toFixed(4)),\n  action_th: 'ทบทวนแบบบันทึกและสาเหตุของรายการไม่ครบในกลุ่มนี้ โดยเจ้าของกระบวนการของวิชาชีพ',\n  kpi: 'completion_rate',\n  target: 'เพิ่มขึ้นจากค่าปัจจุบันและไม่ลดลงในรอบถัดไป'\n}));\nif (Number(data.join_coverage_rate) < 0.98) {\n  recommendations.unshift({\n    priority: 0,\n    action_th: 'ตรวจ mapping ระหว่างข้อมูล Audit และรายการอ้างอิงสำหรับแถวที่ Join ไม่สำเร็จ',\n    kpi: 'join_coverage_rate',\n    current: data.join_coverage_rate,\n    target: 'อย่างน้อย 0.98'\n  });\n}\nconst analysis = [\n  `สถานะข้อมูล: ${data.readiness_status}`,\n  `จำนวนข้อมูล: ${Number(data.fact_rows).toLocaleString('th-TH')} แถว`,\n  `Join coverage: ${(Number(data.join_coverage_rate) * 100).toFixed(2)}%`,\n  `Failed checks: ${data.failed_checks}, Warning checks: ${data.warning_checks}`,\n  'ข้อเสนอแนะนี้สร้างจากกฎที่กำหนดไว้ ยังไม่ได้เรียก Gemini และต้องผ่าน Human Review'\n].join('\\n');\nreturn [{ json: {\n  accepted: true,\n  response_status: 'ANALYZED',\n  analysis_mode: 'DETERMINISTIC_FALLBACK',\n  received_at: data.received_at,\n  analyzed_at: new Date().toISOString(),\n  run_id: data.run_id,\n  readiness_status: data.readiness_status,\n  fact_rows: data.fact_rows,\n  join_coverage_rate: data.join_coverage_rate,\n  failed_checks: data.failed_checks,\n  warning_checks: data.warning_checks,\n  analysis_th: analysis,\n  recommendations,\n  human_review_required: true\n} }];"
+        "jsCode": "const incoming = $input.first().json;\nconst prepared = $('Prepare AI Context').first().json;\nconst data = incoming?.payload ? incoming : prepared;\nconst rows = Array.isArray(data.payload?.aggregates) ? data.payload.aggregates : [];\nconst valid = rows.filter(r => Number.isFinite(Number(r.completion_rate)));\nconst worst = [...valid].sort((a,b) => Number(a.completion_rate) - Number(b.completion_rate)).slice(0, 5);\nconst recommendations = worst.map((r, index) => ({\n  priority: index + 1,\n  role: r.Role,\n  period: r['Year-Month'],\n  dimension: r.QDimension ?? 'ไม่ระบุ',\n  completion_rate: Number(Number(r.completion_rate).toFixed(4)),\n  action_th: 'ทบทวนแบบบันทึกและสาเหตุของรายการไม่ครบในกลุ่มนี้ โดยเจ้าของกระบวนการของวิชาชีพ',\n  kpi: 'completion_rate',\n  target: 'เพิ่มขึ้นจากค่าปัจจุบันและไม่ลดลงในรอบถัดไป'\n}));\nif (Number(data.join_coverage_rate) < 0.98) {\n  recommendations.unshift({\n    priority: 0,\n    action_th: 'ตรวจ mapping ระหว่างข้อมูล Audit และรายการอ้างอิงสำหรับแถวที่ Join ไม่สำเร็จ',\n    kpi: 'join_coverage_rate',\n    current: data.join_coverage_rate,\n    target: 'อย่างน้อย 0.98'\n  });\n}\nconst analysis = [\n  `สถานะข้อมูล: ${data.readiness_status}`,\n  `จำนวนข้อมูล: ${Number(data.fact_rows).toLocaleString('th-TH')} แถว`,\n  `Join coverage: ${(Number(data.join_coverage_rate) * 100).toFixed(2)}%`,\n  `Failed checks: ${data.failed_checks}, Warning checks: ${data.warning_checks}`,\n  'ข้อเสนอแนะนี้สร้างจากกฎที่กำหนดไว้ ยังไม่ได้เรียก Gemini และต้องผ่าน Human Review'\n].join('\\n');\nreturn [{ json: {\n  accepted: true,\n  response_status: 'ANALYZED',\n  analysis_mode: 'DETERMINISTIC_FALLBACK',\n  received_at: data.received_at,\n  analyzed_at: new Date().toISOString(),\n  run_id: data.run_id,\n  readiness_status: data.readiness_status,\n  fact_rows: data.fact_rows,\n  join_coverage_rate: data.join_coverage_rate,\n  failed_checks: data.failed_checks,\n  warning_checks: data.warning_checks,\n  analysis_th: analysis,\n  recommendations,\n  human_review_required: true\n} }];"
       },
       "id": "ae4381ee-c795-4841-bad8-9cdfc55f9b10",
       "name": "Deterministic Recommendation",
@@ -400,7 +404,7 @@
     },
     {
       "parameters": {
-        "jsCode": "const data = $input.first().json;\nconst question = String(data.question ?? '').toLowerCase();\nconst context = data.context ?? {};\nconst quality = context.quality_summary ?? {};\nconst roles = context.role_summary ?? [];\nconst worst = context.worst_20_role_month_dimensions ?? [];\nconst warnings = context.warnings ?? [];\n\nconst pct = value => Number.isFinite(Number(value)) ? (Number(value) * 100).toFixed(2) + '%' : 'ไม่พบข้อมูล';\nconst number = value => Number(value ?? 0).toLocaleString('th-TH');\nconst areaLine = (area, index) => (index + 1) + '. ' + area.role + ' | ' + area.period + ' | มิติ ' + area.dimension + ' = ' + pct(area.completion_rate) + ' (ไม่ครบ ' + number(area.incomplete) + '/' + number(area.scored) + ')';\nconst roleLine = (role, index) => (index + 1) + '. ' + role.role + ' = ' + pct(role.completion_rate) + ' (ไม่ครบ ' + number(role.incomplete) + '/' + number(role.scored) + ')';\n\nlet lines = ['โหมดกฎสำรอง (ยังไม่ได้เปิด Gemini AI)'];\nif (/ต่ำ|แย่|ผิดปกติ|น้อยสุด|bottom|worst/.test(question)) {\n  lines.push('จุดที่ completion rate ต่ำที่สุดจากข้อมูลล่าสุด:');\n  lines.push(...worst.slice(0, 5).map(areaLine));\n} else if (/ปรับปรุง|แก้ไข|แนะนำ|recommend|action/.test(question)) {\n  lines.push('ข้อเสนอแนะที่ควรทำก่อน:');\n  if (Number(quality.join_coverage_rate) < 0.98) {\n    lines.push('1. ตรวจ mapping ของรายการที่ Join ไม่สำเร็จ ปัจจุบัน Join coverage ' + pct(quality.join_coverage_rate) + ' เป้าหมายอย่างน้อย 98%');\n  }\n  lines.push('2. ให้เจ้าของกระบวนการทบทวน 3 กลุ่มต่ำสุด:');\n  lines.push(...worst.slice(0, 3).map(areaLine));\n  lines.push('3. ติดตาม completion rate รอบถัดไปและยืนยันสาเหตุด้วย Human Review ก่อนดำเนินการ');\n} else if (/วิชาชีพ|role|doctor|nurse|pharmacist|dietitian|physio|csr|lab|xray|แพทย์|พยาบาล|เภสัช|โภชน|กายภาพ|รังสี/.test(question)) {\n  lines.push('สรุปตามวิชาชีพ เรียงจาก completion rate ต่ำไปสูง:');\n  lines.push(...roles.map(roleLine));\n} else if (/ข้อจำกัด|warning|เตือน|คุณภาพ|quality/.test(question)) {\n  lines.push('สถานะข้อมูล: ' + (quality.readiness_status ?? 'ไม่พบข้อมูล'));\n  lines.push('จำนวน Fact: ' + number(quality.fact_rows) + ' แถว');\n  lines.push('Join coverage: ' + pct(quality.join_coverage_rate));\n  lines.push('Failed checks: ' + number(quality.failed_checks) + ', Warning checks: ' + number(quality.warning_checks));\n  if (warnings.length) {\n    lines.push('คำเตือนหลัก:');\n    lines.push(...warnings.slice(0, 8).map((warning, index) => (index + 1) + '. ' + warning.check_id + ' - ' + warning.message_th));\n  }\n} else if (/สรุป|สถานะ|ภาพรวม|ล่าสุด|summary|status/.test(question)) {\n  lines.push('สถานะข้อมูลล่าสุด: ' + (quality.readiness_status ?? 'ไม่พบข้อมูล'));\n  lines.push('จำนวน Fact: ' + number(quality.fact_rows) + ' แถว');\n  lines.push('Join coverage: ' + pct(quality.join_coverage_rate));\n  lines.push('Failed checks: ' + number(quality.failed_checks) + ', Warning checks: ' + number(quality.warning_checks));\n  if (worst[0]) lines.push('จุดต่ำสุด: ' + areaLine(worst[0], 0));\n} else {\n  lines.push('ฉันตอบได้จากข้อมูล Aggregate ล่าสุด เช่น:');\n  lines.push('- สรุปสถานะคุณภาพข้อมูลล่าสุด');\n  lines.push('- จุดที่ completion rate ต่ำที่สุด');\n  lines.push('- สรุป completion rate ตามวิชาชีพ');\n  lines.push('- ควรปรับปรุงอะไรเป็นลำดับแรก');\n  lines.push('- มีคำเตือนหรือข้อจำกัดอะไรบ้าง');\n}\nlines.push('ข้อจำกัด: คำตอบนี้มาจากกฎและข้อมูลสรุป ไม่ใช่การวินิจฉัยทางคลินิก และข้อเสนอแนะต้องผ่าน Human Review');\nreturn [{ json: { output: lines.join('\\n') } }];"
+        "jsCode": "const incoming = $input.first().json;\nconst prepared = $('Privacy Guard and Prepare Context').first().json;\nconst data = incoming?.context ? incoming : prepared;\nconst question = String(data.question ?? '').toLowerCase();\nconst context = data.context ?? {};\nconst quality = context.quality_summary ?? {};\nconst roles = context.role_summary ?? [];\nconst worst = context.worst_20_role_month_dimensions ?? [];\nconst warnings = context.warnings ?? [];\n\nconst pct = value => Number.isFinite(Number(value)) ? (Number(value) * 100).toFixed(2) + '%' : 'ไม่พบข้อมูล';\nconst number = value => Number(value ?? 0).toLocaleString('th-TH');\nconst areaLine = (area, index) => (index + 1) + '. ' + area.role + ' | ' + area.period + ' | มิติ ' + area.dimension + ' = ' + pct(area.completion_rate) + ' (ไม่ครบ ' + number(area.incomplete) + '/' + number(area.scored) + ')';\nconst roleLine = (role, index) => (index + 1) + '. ' + role.role + ' = ' + pct(role.completion_rate) + ' (ไม่ครบ ' + number(role.incomplete) + '/' + number(role.scored) + ')';\n\nlet lines = ['โหมดกฎสำรอง (ยังไม่ได้เปิด Gemini AI)'];\nif (/ต่ำ|แย่|ผิดปกติ|น้อยสุด|bottom|worst/.test(question)) {\n  lines.push('จุดที่ completion rate ต่ำที่สุดจากข้อมูลล่าสุด:');\n  lines.push(...worst.slice(0, 5).map(areaLine));\n} else if (/ปรับปรุง|แก้ไข|แนะนำ|recommend|action/.test(question)) {\n  lines.push('ข้อเสนอแนะที่ควรทำก่อน:');\n  if (Number(quality.join_coverage_rate) < 0.98) {\n    lines.push('1. ตรวจ mapping ของรายการที่ Join ไม่สำเร็จ ปัจจุบัน Join coverage ' + pct(quality.join_coverage_rate) + ' เป้าหมายอย่างน้อย 98%');\n  }\n  lines.push('2. ให้เจ้าของกระบวนการทบทวน 3 กลุ่มต่ำสุด:');\n  lines.push(...worst.slice(0, 3).map(areaLine));\n  lines.push('3. ติดตาม completion rate รอบถัดไปและยืนยันสาเหตุด้วย Human Review ก่อนดำเนินการ');\n} else if (/วิชาชีพ|role|doctor|nurse|pharmacist|dietitian|physio|csr|lab|xray|แพทย์|พยาบาล|เภสัช|โภชน|กายภาพ|รังสี/.test(question)) {\n  lines.push('สรุปตามวิชาชีพ เรียงจาก completion rate ต่ำไปสูง:');\n  lines.push(...roles.map(roleLine));\n} else if (/ข้อจำกัด|warning|เตือน|คุณภาพ|quality/.test(question)) {\n  lines.push('สถานะข้อมูล: ' + (quality.readiness_status ?? 'ไม่พบข้อมูล'));\n  lines.push('จำนวน Fact: ' + number(quality.fact_rows) + ' แถว');\n  lines.push('Join coverage: ' + pct(quality.join_coverage_rate));\n  lines.push('Failed checks: ' + number(quality.failed_checks) + ', Warning checks: ' + number(quality.warning_checks));\n  if (warnings.length) {\n    lines.push('คำเตือนหลัก:');\n    lines.push(...warnings.slice(0, 8).map((warning, index) => (index + 1) + '. ' + warning.check_id + ' - ' + warning.message_th));\n  }\n} else if (/สรุป|สถานะ|ภาพรวม|ล่าสุด|summary|status/.test(question)) {\n  lines.push('สถานะข้อมูลล่าสุด: ' + (quality.readiness_status ?? 'ไม่พบข้อมูล'));\n  lines.push('จำนวน Fact: ' + number(quality.fact_rows) + ' แถว');\n  lines.push('Join coverage: ' + pct(quality.join_coverage_rate));\n  lines.push('Failed checks: ' + number(quality.failed_checks) + ', Warning checks: ' + number(quality.warning_checks));\n  if (worst[0]) lines.push('จุดต่ำสุด: ' + areaLine(worst[0], 0));\n} else {\n  lines.push('ฉันตอบได้จากข้อมูล Aggregate ล่าสุด เช่น:');\n  lines.push('- สรุปสถานะคุณภาพข้อมูลล่าสุด');\n  lines.push('- จุดที่ completion rate ต่ำที่สุด');\n  lines.push('- สรุป completion rate ตามวิชาชีพ');\n  lines.push('- ควรปรับปรุงอะไรเป็นลำดับแรก');\n  lines.push('- มีคำเตือนหรือข้อจำกัดอะไรบ้าง');\n}\nlines.push('ข้อจำกัด: คำตอบนี้มาจากกฎและข้อมูลสรุป ไม่ใช่การวินิจฉัยทางคลินิก และข้อเสนอแนะต้องผ่าน Human Review');\nreturn [{ json: { output: lines.join('\\n') } }];"
       },
       "id": "2b9111f8-9698-4b7f-ae92-6857c490a62c",
       "name": "Deterministic Chat Answer",
@@ -441,7 +445,8 @@
       "position": [
         410,
         400
-      ]
+      ],
+      "onError": "continueErrorOutput"
     },
     {
       "parameters": {
@@ -463,7 +468,10 @@
           "id": "pb7uDAfJLLv515zd",
           "name": "Google Gemini(PaLM) Api account"
         }
-      }
+      },
+      "retryOnFail": true,
+      "maxTries": 5,
+      "waitBetweenTries": 5000
     },
     {
       "parameters": {
@@ -605,6 +613,13 @@
             "type": "main",
             "index": 0
           }
+        ],
+        [
+          {
+            "node": "Deterministic Recommendation",
+            "type": "main",
+            "index": 0
+          }
         ]
       ]
     },
@@ -738,6 +753,18 @@
           {
             "node": "AI Agent",
             "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Deterministic Chat Answer",
+            "type": "main",
             "index": 0
           }
         ]

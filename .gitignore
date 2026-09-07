@@ -33,6 +33,7 @@ dags_backup_*/
 docker-compose.backup.yaml
 docker-compose-original.yaml
 docker-compose.before-mra-dag.yaml
+HANDOVER_*.md
 
 # Notebook temporary files
 .ipynb_checkpoints/
