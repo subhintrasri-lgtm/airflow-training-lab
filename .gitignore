@@ -23,6 +23,10 @@ data/agent/
 # ข้อมูล MRA
 *.xlsb
 ResultMRauditJCIHA.xlsx
+MRCode.xlsx
+HAReportJan2024-May2025.xlsm
+NewAuditForm2025.xlsx
+audit_enriched.parquet
 agentic_etl_output*
 rejected_records.csv
 quality_report.json

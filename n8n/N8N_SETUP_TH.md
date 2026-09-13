@@ -10,10 +10,12 @@
 
 `Airflow build_agent_payload` → `Airflow notify_n8n` → `n8n Webhook` → `Validate Agent Payload` → `Quality Gate` → `AI Agent/Fallback` → `HTTP Response`
 
-ภายใน Workflow เดียวกันมีจุดเริ่มต้น 2 ทาง:
+ภายใน Workflow เดียวกันมีจุดเริ่มต้น 4 ทาง:
 
 1. `Airflow Webhook` → `Validate` → `Quality Gate` → `AI Agent/Fallback` → `HTTP Response`
 2. `n8n Chat` → `อ่าน agent_payload.json` → `Privacy Guard` → `Gemini AI/คำตอบสำรอง` → `ตอบภาษาไทย`
+3. `Compliance Chart Webhook` → `อ่าน compliance_by_profession.svg` → `ตอบกราฟ SVG`
+4. `Cluster Compliance Chart Webhook` → `อ่าน compliance_by_cluster.svg` → `ตอบกราฟ Cluster SVG`
 
 ## โครงสร้าง Node หลักตามโจทย์
 
@@ -22,6 +24,7 @@
 - `Conversation Memory` จำบริบทการสนทนา 8 ข้อความ
 - `Google Gemini Model` เป็น Language Model ของ Agent
 - `Get_Airflow_Log` เป็น HTTP Request Tool แบบ GET และต่อเข้าช่อง `ai_tool` ของ Agent
+- `Compliance Chart Webhook` อ่านกราฟ Aggregate แบบ read-only และไม่ส่งข้อมูลไปบริการสร้างกราฟภายนอก
 
 `Get_Airflow_Log` ใช้ URL ฐาน `http://airflow-webserver:8080/api/v1/{api_path}` และใช้ Credential `Airflow API Basic Auth` ซึ่ง n8n เก็บแบบเข้ารหัส ไม่เก็บ username/password ใน Workflow JSON หรือ GitHub
 
@@ -36,12 +39,38 @@
 3. เปิด Workflow `MRA - Airflow Quality + AI Chat`
 4. กดปุ่ม **Open chat** ที่มุมล่างของหน้า Workflow
 5. ทดลองถาม เช่น `สรุปสถานะคุณภาพข้อมูลล่าสุด` หรือ `จุดที่ completion rate ต่ำที่สุดคืออะไร`
+6. หากต้องการผลตาม Power BI ให้ถาม `Compliance rate ของแต่ละสหสาขาวิชาชีพเป็นเท่าไร`
+7. หากต้องการกราฟ ให้ถาม `ช่วยสร้างกราฟ Compliance rate ของแต่ละสหสาขาวิชาชีพ`
+8. หากต้องการคะแนน Cluster ให้ถาม `Compliance rate ของแต่ละ Cluster เป็นอย่างไร`
+9. หากต้องการประเด็นด้านใน ให้ระบุชื่อหรือรหัส เช่น `Cluster MED ต้องปรับปรุงเรื่องใด`
 
 หรือเปิดหน้า Chat โดยตรงที่:
 
 http://localhost:5678/webhook/a74231de-4bf9-438a-baad-ea97cb3f7d74/chat
 
 Chat อ่านเฉพาะ `data/agent/agent_payload.json` ซึ่งเป็นข้อมูล Aggregate ไม่มี HN, AN หรือชื่อผู้ป่วย หากถามข้อมูลรายบุคคล ระบบจะปฏิเสธอัตโนมัติ
+
+เมื่อถาม Compliance ระบบใช้สูตรเดียวกับ Power BI คือ
+`SUM(Value) / COUNTROWS(MRA Data)` และตอบพร้อม Total Score, Total Audit Items
+และช่วงเวลาของข้อมูล โดยไม่ใช้ `completion_rate` แทนและไม่เฉลี่ยค่า rate ข้ามกลุ่ม
+
+กราฟขนาดเต็มเปิดได้ที่:
+
+http://localhost:5678/webhook/mra-compliance-chart
+
+กราฟตาม Cluster เปิดได้ที่:
+
+http://localhost:5678/webhook/mra-cluster-compliance-chart
+
+กราฟเป็น SVG ที่ Airflow สร้างจาก Aggregate หลังจบ Task `build_agent_payload` โดยแสดง
+ค่าร้อยละ ตัวตั้ง/ตัวหาร และช่วงข้อมูล หากหน้า Chat ไม่แสดงภาพ ให้กดลิงก์
+**เปิดกราฟขนาดเต็ม** ในคำตอบ ข้อความสรุปตัวเลขจะยังแสดงตามปกติ
+
+คำตอบระดับ Cluster ใช้ `ClusterID` จับคู่กับ `SCShortName` จาก `SubClusterID.xlsb`
+และคำนวณ Compliance จากผลรวมคะแนนหารด้วยจำนวนรายการตรวจ ห้ามเฉลี่ยร้อยละข้ามกลุ่ม
+เมื่อถามประเด็นที่ควรปรับปรุง ระบบจะแสดงรายการตรวจที่มีคะแนนต่ำใน Cluster นั้นพร้อม
+วิชาชีพ มิติคุณภาพ ตัวตั้งและตัวหาร รายการเหล่านี้เป็นจุดที่ควรตรวจทบทวน ไม่ใช่สาเหตุ
+ที่ยืนยันแล้ว และต้องผ่าน Human Review
 
 เส้นทาง Chat เปิดใช้ Gemini แล้วและต้องมี Credential `Google Gemini(PaLM) Api account` ใน n8n หาก Gemini ใช้งานไม่ได้ ระบบจะส่งข้อความแจ้งข้อผิดพลาดแทนการสร้างคำตอบขึ้นเอง
 

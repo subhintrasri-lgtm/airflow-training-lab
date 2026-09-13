@@ -12,13 +12,14 @@
 | `inspect_n8n_workflow_refs.js` | ตรวจว่า node อ้าง workflow/credential อะไรบ้าง |
 | `inspect_n8n_credentials.js` | อ่านรายชื่อ credential จาก `database.sqlite` ของ n8n (read-only) |
 | `inspect_n8n_executions.py` | อ่าน execution ล่าสุดจาก snapshot ของ `database.sqlite` เพื่อ debug tool call |
+| `update_compliance_chat.js` | เพิ่มบริบท Compliance ตามสูตร Power BI, คำตอบแบบกราฟ และ 3 Node สำหรับให้บริการ SVG ใน workflow หลัก |
 
 `inspect_n8n_executions.py` ต้องมี `database_snapshot.sqlite` วางไว้ข้าง ๆ ก่อนรัน
 และจะเขียน `latest_execution_data.txt` ออกมา — อย่า commit ไฟล์ทั้งสองนั้น
 
 ## workflows/
 
-- `mra_airflow_webhook.json` — ตัวที่ใช้จริง 23 nodes (webhook + AI chat รวมกันแล้ว)
+- `mra_airflow_webhook.json` — ตัวที่ใช้จริง 26 nodes (Airflow webhook + AI chat + Compliance chart รวมกันแล้ว)
 - `mra_data_chat.json` — chat workflow เดี่ยว 11 nodes ก่อน merge เก็บไว้อ้างอิง
 
 ## archive/

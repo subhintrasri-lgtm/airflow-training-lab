@@ -7,6 +7,7 @@ import re
 import shutil
 import uuid
 from datetime import datetime, timezone
+from html import escape
 from pathlib import Path
 from typing import Any
 
@@ -15,7 +16,7 @@ import pandas as pd
 
 
 PIPELINE_NAME = "agentic_mra_airflow_etl"
-PIPELINE_VERSION = "1.0.0"
+PIPELINE_VERSION = "1.3.0"
 
 DATA_ROOT = Path(os.getenv("MRA_DATA_DIR", "/opt/airflow/data"))
 INPUT_DIR = Path(os.getenv("MRA_INPUT_DIR", str(DATA_ROOT / "input")))
@@ -26,7 +27,33 @@ OUTPUT_DIR = Path(
     os.getenv("MRA_OUTPUT_DIR", str(DATA_ROOT / "output" / "mra_agentic"))
 )
 AGENT_DIR = Path(os.getenv("MRA_AGENT_DIR", str(DATA_ROOT / "agent")))
+ONEDRIVE_INPUT_VALUE = os.getenv("MRA_ONEDRIVE_INPUT_DIR", "").strip()
+ONEDRIVE_INPUT_DIR = Path(ONEDRIVE_INPUT_VALUE) if ONEDRIVE_INPUT_VALUE else None
+MOI_ONEDRIVE_INPUT_VALUE = os.getenv("MRA_MOI_ONEDRIVE_INPUT_DIR", "").strip()
+MOI_ONEDRIVE_INPUT_DIR = (
+    Path(MOI_ONEDRIVE_INPUT_VALUE) if MOI_ONEDRIVE_INPUT_VALUE else None
+)
+SUBCLUSTER_ONEDRIVE_INPUT_VALUE = os.getenv(
+    "MRA_SUBCLUSTER_ONEDRIVE_INPUT_DIR", ""
+).strip()
+SUBCLUSTER_ONEDRIVE_INPUT_DIR = (
+    Path(SUBCLUSTER_ONEDRIVE_INPUT_VALUE)
+    if SUBCLUSTER_ONEDRIVE_INPUT_VALUE
+    else None
+)
+MOI_LOCAL_INPUT_DIR = Path(os.getenv("MRA_MOI_INPUT_DIR", str(INPUT_DIR)))
+REFERENCE_INPUT_DIR = Path(
+    os.getenv("MRA_REFERENCE_INPUT_DIR", str(INPUT_DIR))
+)
+AUDIT_SNAPSHOT_DIR = STAGING_DIR / "source_snapshot"
+MOI_SNAPSHOT_DIR = STAGING_DIR / "moi_reference_snapshot"
 REFERENCE_FILE = "ResultMRauditJCIHA.xlsx"
+MOI_REFERENCE_FILES = [
+    "MRCode.xlsx",
+    "HAReportJan2024-May2025.xlsm",
+    "NewAuditForm2025.xlsx",
+]
+SUBCLUSTER_REFERENCE_FILE = "SubClusterID.xlsb"
 
 ROLE_CONFIG = [
     {"key": "doctor", "source_file": "1.Doctor.xlsb", "prefix": "Doctor", "sheet": "Doctor"},
@@ -94,6 +121,174 @@ def sha256_file(path: Path, block_size: int = 1024 * 1024) -> str:
     return digest.hexdigest()
 
 
+def audit_input_dir() -> Path:
+    """Return the immutable audit snapshot for this run when OneDrive is enabled."""
+    return AUDIT_SNAPSHOT_DIR if ONEDRIVE_INPUT_DIR is not None else INPUT_DIR
+
+
+def moi_input_dir() -> Path:
+    """Return the immutable MOI reference snapshot when OneDrive is enabled."""
+    return (
+        MOI_SNAPSHOT_DIR
+        if MOI_ONEDRIVE_INPUT_DIR is not None
+        else MOI_LOCAL_INPUT_DIR
+    )
+
+
+def sync_onedrive_inputs() -> dict[str, Any]:
+    """Copy all eight OneDrive workbooks into one verified local snapshot."""
+    ensure_directories()
+    if ONEDRIVE_INPUT_DIR is None:
+        return {
+            "status": "LOCAL_INPUT",
+            "files_synced": 0,
+            "input_dir": str(INPUT_DIR),
+        }
+
+    if not ONEDRIVE_INPUT_DIR.is_dir():
+        raise FileNotFoundError(
+            f"ไม่พบ OneDrive input directory: {ONEDRIVE_INPUT_DIR}"
+        )
+
+    pending = STAGING_DIR / "source_snapshot_pending"
+    previous = STAGING_DIR / "source_snapshot_previous"
+    shutil.rmtree(pending, ignore_errors=True)
+    shutil.rmtree(previous, ignore_errors=True)
+    pending.mkdir(parents=True, exist_ok=False)
+
+    manifest = []
+    try:
+        for config in ROLE_CONFIG:
+            source = ONEDRIVE_INPUT_DIR / config["source_file"]
+            if not source.is_file():
+                raise FileNotFoundError(f"ไม่พบไฟล์ OneDrive: {source.name}")
+
+            source_hash_before = sha256_file(source)
+            destination = pending / source.name
+            shutil.copy2(source, destination)
+            source_hash_after = sha256_file(source)
+            copied_hash = sha256_file(destination)
+            if source_hash_before != source_hash_after or copied_hash != source_hash_after:
+                raise RuntimeError(
+                    f"OneDrive กำลังเปลี่ยนไฟล์ระหว่างคัดลอก: {source.name}"
+                )
+            manifest.append(
+                {
+                    "file": source.name,
+                    "size_bytes": destination.stat().st_size,
+                    "modified_at_utc": datetime.fromtimestamp(
+                        destination.stat().st_mtime, tz=timezone.utc
+                    ).isoformat(),
+                    "sha256": copied_hash,
+                }
+            )
+
+        if AUDIT_SNAPSHOT_DIR.exists():
+            AUDIT_SNAPSHOT_DIR.replace(previous)
+        try:
+            pending.replace(AUDIT_SNAPSHOT_DIR)
+        except Exception:
+            if previous.exists() and not AUDIT_SNAPSHOT_DIR.exists():
+                previous.replace(AUDIT_SNAPSHOT_DIR)
+            raise
+        shutil.rmtree(previous, ignore_errors=True)
+    except Exception:
+        shutil.rmtree(pending, ignore_errors=True)
+        raise
+
+    write_json(STAGING_DIR / "onedrive_snapshot_manifest.json", manifest)
+    print(f"สร้าง OneDrive snapshot สำเร็จ {len(manifest)} ไฟล์")
+    return {
+        "status": "SNAPSHOT_READY",
+        "files_synced": len(manifest),
+        "snapshot_dir": str(AUDIT_SNAPSHOT_DIR),
+    }
+
+
+def sync_moi_reference_inputs() -> dict[str, Any]:
+    """Copy approved MOI and Cluster workbooks into one verified snapshot."""
+    ensure_directories()
+    if MOI_ONEDRIVE_INPUT_DIR is None:
+        return {
+            "status": "LOCAL_INPUT",
+            "files_synced": 0,
+            "input_dir": str(MOI_LOCAL_INPUT_DIR),
+        }
+    if not MOI_ONEDRIVE_INPUT_DIR.is_dir():
+        raise FileNotFoundError(
+            f"ไม่พบ MOI OneDrive directory: {MOI_ONEDRIVE_INPUT_DIR}"
+        )
+    if (
+        SUBCLUSTER_ONEDRIVE_INPUT_DIR is not None
+        and not SUBCLUSTER_ONEDRIVE_INPUT_DIR.is_dir()
+    ):
+        raise FileNotFoundError(
+            f"ไม่พบ SubCluster OneDrive directory: {SUBCLUSTER_ONEDRIVE_INPUT_DIR}"
+        )
+
+    pending = STAGING_DIR / "moi_reference_snapshot_pending"
+    previous = STAGING_DIR / "moi_reference_snapshot_previous"
+    shutil.rmtree(pending, ignore_errors=True)
+    shutil.rmtree(previous, ignore_errors=True)
+    pending.mkdir(parents=True, exist_ok=False)
+    manifest = []
+    try:
+        source_specs = [
+            (MOI_ONEDRIVE_INPUT_DIR, file_name, "moi_reference")
+            for file_name in MOI_REFERENCE_FILES
+        ]
+        source_specs.append(
+            (
+                SUBCLUSTER_ONEDRIVE_INPUT_DIR or MOI_ONEDRIVE_INPUT_DIR,
+                SUBCLUSTER_REFERENCE_FILE,
+                "subcluster_reference",
+            )
+        )
+        for source_dir, file_name, source_type in source_specs:
+            source = source_dir / file_name
+            if not source.is_file():
+                raise FileNotFoundError(f"ไม่พบไฟล์ Mapping OneDrive: {file_name}")
+            source_hash_before = sha256_file(source)
+            destination = pending / file_name
+            shutil.copy2(source, destination)
+            source_hash_after = sha256_file(source)
+            copied_hash = sha256_file(destination)
+            if source_hash_before != source_hash_after or copied_hash != source_hash_after:
+                raise RuntimeError(f"OneDrive กำลังเปลี่ยนไฟล์ระหว่างคัดลอก: {file_name}")
+            manifest.append(
+                {
+                    "file": file_name,
+                    "source_type": source_type,
+                    "size_bytes": destination.stat().st_size,
+                    "modified_at_utc": datetime.fromtimestamp(
+                        destination.stat().st_mtime, tz=timezone.utc
+                    ).isoformat(),
+                    "sha256": copied_hash,
+                }
+            )
+
+        if MOI_SNAPSHOT_DIR.exists():
+            MOI_SNAPSHOT_DIR.replace(previous)
+        try:
+            pending.replace(MOI_SNAPSHOT_DIR)
+        except Exception:
+            if previous.exists() and not MOI_SNAPSHOT_DIR.exists():
+                previous.replace(MOI_SNAPSHOT_DIR)
+            raise
+        shutil.rmtree(previous, ignore_errors=True)
+    except Exception:
+        shutil.rmtree(pending, ignore_errors=True)
+        raise
+
+    write_json(STAGING_DIR / "moi_snapshot_manifest.json", manifest)
+    print(f"สร้าง MOI reference snapshot สำเร็จ {len(manifest)} ไฟล์")
+    return {
+        "status": "SNAPSHOT_READY",
+        "files_synced": len(manifest),
+        "snapshot_dir": str(MOI_SNAPSHOT_DIR),
+    }
+
+
 def clean_text(value: Any):
     if value is None or pd.isna(value):
         return pd.NA
@@ -140,17 +335,28 @@ def sheet_period(sheet_name: str):
 
 def check_input_files() -> dict[str, Any]:
     ensure_directories()
-    required = [item["source_file"] for item in ROLE_CONFIG] + [REFERENCE_FILE]
-    missing = [name for name in required if not (INPUT_DIR / name).is_file()]
+    audit_dir = audit_input_dir()
+    required = [
+        (audit_dir, item["source_file"], "audit") for item in ROLE_CONFIG
+    ] + [
+        (REFERENCE_INPUT_DIR, REFERENCE_FILE, "reference")
+    ] + [
+        (moi_input_dir(), file_name, "moi_reference")
+        for file_name in MOI_REFERENCE_FILES
+    ] + [
+        (moi_input_dir(), SUBCLUSTER_REFERENCE_FILE, "subcluster_reference")
+    ]
+    missing = [name for base, name, _ in required if not (base / name).is_file()]
     if missing:
         raise FileNotFoundError("ไม่พบไฟล์: " + ", ".join(missing))
 
     manifest = []
-    for name in required:
-        path = INPUT_DIR / name
+    for base, name, source_type in required:
+        path = base / name
         manifest.append(
             {
                 "file": name,
+                "source_type": source_type,
                 "size_bytes": path.stat().st_size,
                 "modified_at_utc": datetime.fromtimestamp(
                     path.stat().st_mtime, tz=timezone.utc
@@ -169,7 +375,7 @@ def extract_role(role_key: str) -> dict[str, Any]:
         raise ValueError(f"ไม่รู้จัก role_key={role_key}")
 
     config = ROLE_BY_KEY[role_key]
-    source_path = INPUT_DIR / config["source_file"]
+    source_path = audit_input_dir() / config["source_file"]
     workbook = pd.ExcelFile(source_path, engine="pyxlsb")
     monthly_sheets = [
         sheet for sheet in workbook.sheet_names if sheet_period(sheet) is not None
@@ -492,7 +698,7 @@ def validate_data_quality() -> dict[str, Any]:
 def join_mraudit_lists() -> dict[str, Any]:
     ensure_directories()
     fact = pd.read_parquet(STAGING_DIR / "combined_fact.parquet")
-    reference_path = INPUT_DIR / REFERENCE_FILE
+    reference_path = REFERENCE_INPUT_DIR / REFERENCE_FILE
     dimension = pd.read_excel(reference_path, sheet_name="MRAuditLists", engine="openpyxl")
     if "YearMonthCaseNum" not in dimension.columns:
         raise ValueError("MRAuditLists ไม่มีคอลัมน์ YearMonthCaseNum")
@@ -574,6 +780,43 @@ def join_mraudit_lists() -> dict[str, Any]:
     return metrics
 
 
+def build_moi_reference_dimensions() -> dict[str, Any]:
+    """Build deterministic, deduplicated dimensions from the MOI workbooks."""
+    from mra_moi_mapper import build_moi_reference_dimensions as build_dimensions
+
+    result = build_dimensions(moi_input_dir(), STAGING_DIR)
+    write_json(STAGING_DIR / "moi_dimension_metrics.json", result["metrics"])
+    write_json(STAGING_DIR / "moi_dimension_checks.json", result["checks"])
+    rows = {
+        name: int(metrics["rows"])
+        for name, metrics in result["metrics"].items()
+    }
+    print("สร้าง MOI dimensions สำเร็จ: " + json.dumps(rows, ensure_ascii=False))
+    return {"dimensions": rows, "checks": len(result["checks"])}
+
+
+def map_moi_references() -> dict[str, Any]:
+    """Enrich the private analytical rows with approved MOI reference fields."""
+    from mra_moi_mapper import map_moi_references as apply_mappings
+
+    result = apply_mappings(STAGING_DIR)
+    write_json(STAGING_DIR / "moi_mapping_metrics.json", result["mappings"])
+    write_json(STAGING_DIR / "moi_mapping_checks.json", result["checks"])
+    print(f"MOI mapping สำเร็จ {result['rows']:,} แถว")
+    return {"rows": result["rows"], "mappings": result["mappings"]}
+
+
+def reconcile_ha_report() -> dict[str, Any]:
+    """Compare encounter coverage with HA Report without persisting identifiers."""
+    from mra_moi_mapper import reconcile_ha_report as reconcile
+
+    result = reconcile(moi_input_dir(), STAGING_DIR)
+    write_json(STAGING_DIR / "ha_reconciliation_metrics.json", result)
+    write_json(STAGING_DIR / "ha_reconciliation_checks.json", result["checks"])
+    print("ตรวจเทียบ HA Report สำเร็จโดยบันทึกเฉพาะจำนวนและอัตราครอบคลุม")
+    return {"period": result["period"], "metrics": result["metrics"]}
+
+
 def _compare_to_reference(actual: pd.DataFrame, reference: pd.DataFrame, scope: str):
     actual_cmp = actual[FACT_COLUMNS].copy()
     reference_cmp = reference[FACT_COLUMNS].copy()
@@ -606,7 +849,7 @@ def _compare_to_reference(actual: pd.DataFrame, reference: pd.DataFrame, scope: 
 
 def compare_reference() -> dict[str, Any]:
     ensure_directories()
-    reference_path = INPUT_DIR / REFERENCE_FILE
+    reference_path = REFERENCE_INPUT_DIR / REFERENCE_FILE
     comparisons = []
     checks = []
     for config in ROLE_CONFIG:
@@ -614,7 +857,8 @@ def compare_reference() -> dict[str, Any]:
         reference = pd.read_excel(reference_path, sheet_name=config["sheet"], engine="openpyxl")
         comparison = _compare_to_reference(actual, reference, config["sheet"])
         comparison["source_newer_than_reference"] = bool(
-            (INPUT_DIR / config["source_file"]).stat().st_mtime > reference_path.stat().st_mtime
+            (audit_input_dir() / config["source_file"]).stat().st_mtime
+            > reference_path.stat().st_mtime
         )
         comparisons.append(comparison)
         checks.append(
@@ -641,9 +885,15 @@ def build_quality_report() -> dict[str, Any]:
     join_metrics = read_json(STAGING_DIR / "join_metrics.json")
     row_summary = read_json(STAGING_DIR / "row_summary.json")
     comparisons = read_json(STAGING_DIR / "reference_comparisons.json")
+    moi_dimension_metrics = read_json(STAGING_DIR / "moi_dimension_metrics.json")
+    moi_mapping_metrics = read_json(STAGING_DIR / "moi_mapping_metrics.json")
+    ha_reconciliation = read_json(STAGING_DIR / "ha_reconciliation_metrics.json")
     checks = (
         read_json(STAGING_DIR / "validation_checks.json")
         + read_json(STAGING_DIR / "join_checks.json")
+        + read_json(STAGING_DIR / "moi_dimension_checks.json")
+        + read_json(STAGING_DIR / "moi_mapping_checks.json")
+        + read_json(STAGING_DIR / "ha_reconciliation_checks.json")
         + read_json(STAGING_DIR / "reference_checks.json")
     )
     failures = [item for item in checks if item["status"] == "FAIL"]
@@ -670,6 +920,11 @@ def build_quality_report() -> dict[str, Any]:
             "date_period_max": str(periods.max()),
         },
         "join": join_metrics,
+        "moi_mapping": {
+            "dimensions": moi_dimension_metrics,
+            "coverage": moi_mapping_metrics,
+        },
+        "ha_reconciliation": ha_reconciliation,
         "checks": checks,
         "reference_comparison": comparisons,
         "agent_readiness": {
@@ -681,7 +936,8 @@ def build_quality_report() -> dict[str, Any]:
             "restrictions_th": [
                 "ส่งเข้า AI เฉพาะ agent_payload.json",
                 "ห้ามส่ง HN, AN หรือข้อมูลระดับบุคคลเข้า LLM",
-                "ต้องเปิดเผย join coverage และ reference drift",
+                "ต้องเปิดเผย join coverage, MOI mapping coverage และ reference drift",
+                "HA Report ใช้ตรวจเทียบแบบ aggregate เท่านั้น ไม่ส่ง encounter key เข้า LLM",
             ],
         },
         "provenance": read_json(STAGING_DIR / "source_manifest.json"),
@@ -706,18 +962,50 @@ def quality_gate() -> dict[str, Any]:
 def load_outputs() -> dict[str, Any]:
     ensure_directories()
     fact = pd.read_parquet(STAGING_DIR / "combined_fact.parquet")
-    enriched = pd.read_parquet(STAGING_DIR / "enriched.parquet")
+    enriched = pd.read_parquet(STAGING_DIR / "moi_enriched.parquet")
     role_frames = {
         config["sheet"]: pd.read_parquet(STAGING_DIR / f"{config['key']}_fact.parquet")[FACT_COLUMNS]
         for config in ROLE_CONFIG
     }
     row_summary = pd.DataFrame(read_json(STAGING_DIR / "row_summary.json"))
+    mapping_summary = pd.DataFrame(read_json(STAGING_DIR / "moi_mapping_metrics.json"))
+    ha_summary = pd.DataFrame(
+        read_json(STAGING_DIR / "ha_reconciliation_metrics.json")["metrics"]
+    )
+    compliance_by_profession_period = _compliance_summary(
+        fact, ["Role", "Year-Month"]
+    )
+    cluster_rows = enriched[
+        enriched["ClusterID"].notna() & enriched["SCShortName"].notna()
+    ].copy()
+    compliance_by_cluster_period = _compliance_summary(
+        cluster_rows, ["ClusterID", "SCShortName", "Year-Month"]
+    )
 
     fact_path = OUTPUT_DIR / "audit_fact.parquet"
     enriched_path = OUTPUT_DIR / "audit_enriched.parquet"
+    compliance_path = OUTPUT_DIR / "compliance_by_profession.parquet"
+    cluster_compliance_path = OUTPUT_DIR / "compliance_by_cluster.parquet"
     workbook_path = OUTPUT_DIR / "agentic_mra_airflow_output.xlsx"
     fact.to_parquet(fact_path, index=False)
     enriched.drop(columns="_join_status").to_parquet(enriched_path, index=False)
+    compliance_by_profession_period.to_parquet(compliance_path, index=False)
+    compliance_by_cluster_period.to_parquet(cluster_compliance_path, index=False)
+    dimension_files = [
+        "moi_question_dimension.parquet",
+        "moi_cluster_dimension.parquet",
+        "moi_ward_dimension.parquet",
+        "moi_icd10_dimension.parquet",
+        "moi_doctor_code_dimension.parquet",
+    ]
+    for file_name in dimension_files:
+        shutil.copyfile(STAGING_DIR / file_name, OUTPUT_DIR / file_name)
+    for file_name in [
+        "moi_dimension_metrics.json",
+        "moi_mapping_metrics.json",
+        "ha_reconciliation_metrics.json",
+    ]:
+        shutil.copyfile(STAGING_DIR / file_name, OUTPUT_DIR / file_name)
 
     rejected_frames = []
     for config in ROLE_CONFIG:
@@ -737,6 +1025,14 @@ def load_outputs() -> dict[str, Any]:
         fact.to_excel(writer, sheet_name="CombinedAudit", index=False)
         enriched.drop(columns="_join_status").to_excel(writer, sheet_name="EnrichedData", index=False)
         row_summary.to_excel(writer, sheet_name="QualitySummary", index=False)
+        mapping_summary.to_excel(writer, sheet_name="MappingCoverage", index=False)
+        ha_summary.to_excel(writer, sheet_name="HAReconciliation", index=False)
+        compliance_by_profession_period.to_excel(
+            writer, sheet_name="ComplianceByProfession", index=False
+        )
+        compliance_by_cluster_period.to_excel(
+            writer, sheet_name="ComplianceByCluster", index=False
+        )
         header_format = writer.book.add_format(
             {
                 "bold": True,
@@ -758,6 +1054,14 @@ def load_outputs() -> dict[str, Any]:
         "dimension_mapping": APPROVED_DIMENSION_MAPPING,
         "score_domain": [0, 1, None],
         "grain": GRAIN_COLUMNS,
+        "moi_reference_files": MOI_REFERENCE_FILES,
+        "subcluster_reference_file": SUBCLUSTER_REFERENCE_FILE,
+        "moi_join_keys": {
+            "NewAuditForm2025.xlsx": "SProID",
+            "MRCode.xlsx": ["ClusterID", "DischargeWardName", "MainICD", "DoctorCode"],
+            "SubClusterID.xlsb": {"join_key": "ClusterID", "cluster_name": "SCShortName"},
+            "HAReportJan2024-May2025.xlsm": ["HN+AN (IPD)", "HN+VisitDate (OPD), aggregate reconciliation only"],
+        },
     }
     write_json(OUTPUT_DIR / "approved_mapping.json", mapping)
     print(f"Load สำเร็จ: {OUTPUT_DIR}")
@@ -778,8 +1082,12 @@ AGENT_PROMPT_TH = """
 2. หาก readiness_status = BLOCKED ให้หยุดและรายงาน blocking checks
 3. ห้ามสร้างตัวเลขหรือสาเหตุที่ไม่มีในข้อมูล
 4. completion_rate = complete / scored เท่านั้น
-5. แจ้ง reference drift และ join coverage ทุกครั้งที่มีผลต่อข้อสรุป
-6. ห้ามขอ แสดง หรืออนุมาน HN, AN ชื่อผู้ป่วย หรือข้อมูลส่วนบุคคล
+5. เมื่อถาม Compliance rate ให้ใช้สูตรเดียวกับ Power BI: SUM(Value) / COUNTROWS เท่านั้น
+6. ห้ามเฉลี่ย compliance_rate ระหว่างกลุ่ม ให้รวม total_score และ total_audit_items ก่อนหาร
+7. เมื่อถาม Cluster ให้ใช้ compliance_by_cluster และชื่อจาก SCShortName ที่ Mapping ด้วย ClusterID
+8. ประเด็นที่ควรปรับปรุงภายใน Cluster ต้องอ้าง cluster_improvement_areas พร้อมตัวตั้ง/ตัวหาร และถือเป็นจุดคะแนนต่ำที่ต้อง Human Review ไม่ใช่สาเหตุที่ยืนยันแล้ว
+9. แจ้ง reference drift, MOI mapping coverage และ HA reconciliation ทุกครั้งที่มีผลต่อข้อสรุป
+10. ห้ามขอ แสดง หรืออนุมาน HN, AN ชื่อผู้ป่วย ชื่อแพทย์ หรือข้อมูลส่วนบุคคล
 
 ตอบภาษาไทยโดยแบ่งเป็น: สถานะข้อมูล, ข้อค้นพบ, จุดผิดปกติ,
 ผลกระทบ, งานที่มนุษย์ต้องตรวจ และข้อจำกัด
@@ -798,9 +1106,170 @@ def _json_safe_records(frame: pd.DataFrame):
     return records
 
 
+def _compliance_summary(frame: pd.DataFrame, group_columns: list[str]) -> pd.DataFrame:
+    """Calculate the Power BI-compatible Compliance measure at an additive grain."""
+    work = frame.copy()
+    work["Value"] = pd.to_numeric(work["Value"], errors="coerce")
+    summary = (
+        work.groupby(group_columns, dropna=False)
+        .agg(
+            total_score=(
+                "Value",
+                lambda values: (
+                    np.nan
+                    if values.notna().sum() == 0
+                    else float(values.sum(min_count=1))
+                ),
+            ),
+            total_audit_items=("Value", "size"),
+            scored_items=("Value", "count"),
+        )
+        .reset_index()
+    )
+    summary["unscored_items"] = (
+        summary["total_audit_items"] - summary["scored_items"]
+    )
+    numerator = pd.to_numeric(summary["total_score"], errors="coerce").astype("float64")
+    denominator = pd.to_numeric(
+        summary["total_audit_items"], errors="coerce"
+    ).astype("float64")
+    summary["compliance_rate"] = np.where(
+        denominator > 0,
+        numerator / denominator,
+        np.nan,
+    )
+    summary["compliance_rate"] = pd.to_numeric(
+        summary["compliance_rate"], errors="coerce"
+    ).round(6)
+    return summary
+
+
+def _compliance_chart_svg(
+    compliance: pd.DataFrame,
+    period_min: str,
+    period_max: str,
+    *,
+    entity_column: str = "Role",
+    detail_column: str | None = None,
+    title: str = "MRA Compliance Rate by Profession",
+) -> str:
+    """Build a privacy-safe SVG chart from aggregate compliance results only."""
+    chart = compliance.copy()
+    chart["compliance_rate"] = pd.to_numeric(
+        chart["compliance_rate"], errors="coerce"
+    )
+    chart = chart.dropna(subset=["compliance_rate"]).sort_values(
+        "compliance_rate", ascending=True
+    )
+
+    width = 1200
+    height = max(620, 220 + len(chart) * 58)
+    plot_left = 275
+    plot_right = 1080
+    plot_width = plot_right - plot_left
+    plot_top = 158
+    row_height = 58
+    bar_height = 30
+
+    role_th = {
+        "Doctor": "แพทย์",
+        "Nurse": "พยาบาล",
+        "Pharmacist": "เภสัชกร",
+        "Dietitian": "นักกำหนดอาหาร",
+        "Physiotherapist": "นักกายภาพบำบัด",
+        "CSR": "เวชระเบียน / CSR",
+        "Lab": "ห้องปฏิบัติการ",
+        "XRay": "รังสีวิทยา",
+    }
+
+    def metric_color(rate: float) -> str:
+        if rate >= 0.90:
+            return "#148F77"
+        if rate > 0.70:
+            return "#D4A017"
+        return "#C84E51"
+
+    description = "; ".join(
+        f"{row.get(entity_column)} {float(row['compliance_rate']) * 100:.2f}%"
+        for row in chart.to_dict(orient="records")
+    )
+    parts = [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        (
+            f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" '
+            f'height="{height}" viewBox="0 0 {width} {height}" role="img" '
+            'aria-labelledby="chart-title chart-desc">'
+        ),
+        f'<title id="chart-title">{escape(title)}</title>',
+        f'<desc id="chart-desc">{escape(description)}</desc>',
+        '<rect width="100%" height="100%" fill="#FFFFFF"/>',
+        '<style>text{font-family:Tahoma,Arial,sans-serif;fill:#1F2933}'
+        '.title{font-size:30px;font-weight:700}.subtitle{font-size:16px;fill:#52606D}'
+        '.label{font-size:17px;font-weight:600}.value{font-size:16px;font-weight:700}'
+        '.detail{font-size:13px;fill:#616E7C}.tick{font-size:13px;fill:#7B8794}'
+        '.note{font-size:14px;fill:#52606D}</style>',
+        f'<text id="chart-title-text" class="title" x="48" y="52">{escape(title)}</text>',
+        (
+            f'<text class="subtitle" x="48" y="84">ช่วงข้อมูล {escape(str(period_min))} ถึง '
+            f'{escape(str(period_max))} · สูตร Power BI: SUM(Value) / COUNTROWS(MRA Data)</text>'
+        ),
+        '<text class="subtitle" x="48" y="111">เรียงจากต่ำไปสูง · แสดงคะแนนรวม / จำนวนรายการตรวจ</text>',
+    ]
+
+    for tick in (0, 25, 50, 75, 100):
+        x = plot_left + (tick / 100) * plot_width
+        parts.append(
+            f'<line x1="{x:.1f}" y1="{plot_top - 12}" x2="{x:.1f}" '
+            f'y2="{plot_top + len(chart) * row_height}" stroke="#E4E7EB" stroke-width="1"/>'
+        )
+        parts.append(
+            f'<text class="tick" x="{x:.1f}" y="{plot_top - 22}" text-anchor="middle">{tick}%</text>'
+        )
+
+    for index, row in enumerate(chart.to_dict(orient="records")):
+        entity = str(row.get(entity_column, ""))
+        label = role_th.get(entity, entity)
+        detail = str(row.get(detail_column, entity)) if detail_column else entity
+        rate = max(0.0, min(1.0, float(row["compliance_rate"])))
+        score = float(row["total_score"])
+        total = int(row["total_audit_items"])
+        y = plot_top + index * row_height
+        bar_width = rate * plot_width
+        parts.extend(
+            [
+                f'<text class="label" x="{plot_left - 18}" y="{y + 15}" text-anchor="end">{escape(label)}</text>',
+                f'<text class="detail" x="{plot_left - 18}" y="{y + 35}" text-anchor="end">{escape(detail)}</text>',
+                f'<rect x="{plot_left}" y="{y}" width="{plot_width}" height="{bar_height}" rx="5" fill="#F0F4F8"/>',
+                (
+                    f'<rect x="{plot_left}" y="{y}" width="{bar_width:.1f}" height="{bar_height}" '
+                    f'rx="5" fill="{metric_color(rate)}" stroke="#34495E" stroke-width="0.8"/>'
+                ),
+                (
+                    f'<text class="value" x="{min(plot_left + bar_width + 10, 1105):.1f}" '
+                    f'y="{y + 21}">{rate * 100:.2f}%</text>'
+                ),
+                (
+                    f'<text class="detail" x="{plot_left}" y="{y + 47}">'
+                    f'{score:,.0f} / {total:,} รายการ</text>'
+                ),
+            ]
+        )
+
+    note_y = plot_top + len(chart) * row_height + 34
+    parts.extend(
+        [
+            f'<text class="note" x="48" y="{note_y}">สีช่วยบอกระดับเท่านั้น โปรดใช้ค่าร้อยละและตัวตั้ง/ตัวหารในการตีความ</text>',
+            f'<text class="note" x="48" y="{note_y + 24}">แหล่งข้อมูล: MRA aggregate payload · ไม่มีข้อมูลระบุตัวผู้ป่วย</text>',
+            '</svg>',
+        ]
+    )
+    return "\n".join(parts)
+
+
 def build_agent_payload() -> dict[str, Any]:
     ensure_directories()
     fact = pd.read_parquet(OUTPUT_DIR / "audit_fact.parquet")
+    enriched = pd.read_parquet(OUTPUT_DIR / "audit_enriched.parquet")
     report = read_json(OUTPUT_DIR / "quality_report.json")
     aggregate = (
         fact.groupby(["Role", "Year-Month", "QDimension"], dropna=False)
@@ -817,6 +1286,60 @@ def build_agent_payload() -> dict[str, Any]:
         aggregate["complete"] / aggregate["scored"],
         np.nan,
     )
+    compliance_by_profession = _compliance_summary(fact, ["Role"])
+    compliance_by_profession_period = _compliance_summary(
+        fact, ["Role", "Year-Month"]
+    )
+    cluster_rows = enriched[
+        enriched["ClusterID"].notna() & enriched["SCShortName"].notna()
+    ].copy()
+    compliance_by_cluster = _compliance_summary(
+        cluster_rows, ["ClusterID", "SCShortName"]
+    )
+    compliance_by_cluster_period = _compliance_summary(
+        cluster_rows, ["ClusterID", "SCShortName", "Year-Month"]
+    )
+    cluster_improvement_areas = _compliance_summary(
+        cluster_rows,
+        [
+            "ClusterID",
+            "SCShortName",
+            "Role",
+            "QDimension",
+            "SProID",
+            "QuestionName",
+            "QuestionDetails",
+        ],
+    )
+    cluster_improvement_areas = (
+        cluster_improvement_areas.sort_values(
+            ["ClusterID", "compliance_rate", "total_audit_items"],
+            ascending=[True, True, False],
+            kind="stable",
+        )
+        .groupby("ClusterID", dropna=False, sort=False)
+        .head(10)
+        .reset_index(drop=True)
+    )
+    chart_name = "compliance_by_profession.svg"
+    chart_svg = _compliance_chart_svg(
+        compliance_by_profession,
+        report["dataset"]["date_period_min"],
+        report["dataset"]["date_period_max"],
+    )
+    (OUTPUT_DIR / chart_name).write_text(chart_svg, encoding="utf-8")
+    (AGENT_DIR / chart_name).write_text(chart_svg, encoding="utf-8")
+    cluster_chart_name = "compliance_by_cluster.svg"
+    cluster_chart_svg = _compliance_chart_svg(
+        compliance_by_cluster,
+        report["dataset"]["date_period_min"],
+        report["dataset"]["date_period_max"],
+        entity_column="SCShortName",
+        detail_column="ClusterID",
+        title="MRA Compliance Rate by Cluster",
+    )
+    (OUTPUT_DIR / cluster_chart_name).write_text(cluster_chart_svg, encoding="utf-8")
+    (AGENT_DIR / cluster_chart_name).write_text(cluster_chart_svg, encoding="utf-8")
     payload = {
         "schema_version": "1.0",
         "run_id": report["pipeline"]["run_id"],
@@ -826,12 +1349,48 @@ def build_agent_payload() -> dict[str, Any]:
             "join_coverage_rate": report["join"]["coverage_rate"],
             "failed_checks": report["agent_readiness"]["failed_checks"],
             "warning_checks": report["agent_readiness"]["warning_checks"],
+            "date_period_min": report["dataset"]["date_period_min"],
+            "date_period_max": report["dataset"]["date_period_max"],
+        },
+        "moi_mapping_summary": report["moi_mapping"]["coverage"],
+        "ha_reconciliation_summary": {
+            "period": report["ha_reconciliation"]["period"],
+            "metrics": report["ha_reconciliation"]["metrics"],
         },
         "metric_definition": {
             "complete": "Value = 1",
             "incomplete": "Value = 0",
             "scored": "Value is not null",
             "completion_rate": "complete / scored",
+            "power_bi_measure": "% Compliance",
+            "total_score": "SUM(Value)",
+            "total_audit_items": "COUNTROWS(MRA Data)",
+            "compliance_rate": "total_score / total_audit_items",
+            "warning": "Do not average compliance_rate; aggregate total_score and total_audit_items first",
+        },
+        "compliance_by_profession": _json_safe_records(compliance_by_profession),
+        "compliance_by_profession_period": _json_safe_records(
+            compliance_by_profession_period
+        ),
+        "compliance_by_cluster": _json_safe_records(compliance_by_cluster),
+        "compliance_by_cluster_period": _json_safe_records(
+            compliance_by_cluster_period
+        ),
+        "cluster_improvement_areas": _json_safe_records(
+            cluster_improvement_areas
+        ),
+        "cluster_mapping_definition": {
+            "source_file": SUBCLUSTER_REFERENCE_FILE,
+            "join_key": "ClusterID",
+            "cluster_name_column": "SCShortName",
+            "improvement_area_limit_per_cluster": 10,
+        },
+        "presentation": {
+            "compliance_chart_file": chart_name,
+            "compliance_chart_path": "/data/agent/compliance_by_profession.svg",
+            "cluster_compliance_chart_file": cluster_chart_name,
+            "cluster_compliance_chart_path": "/data/agent/compliance_by_cluster.svg",
+            "contains_patient_identifiers": False,
         },
         "aggregates": _json_safe_records(aggregate),
         "checks": report["checks"],

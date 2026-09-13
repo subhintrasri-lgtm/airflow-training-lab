@@ -176,6 +176,17 @@ CREATE TABLE `{table}` (
     `los` DOUBLE NULL,
     `count_complete` BIGINT NULL,
     `auditor_error` BIGINT NULL,
+    `question_doc_num` VARCHAR(128) NULL,
+    `question_name` TEXT NULL,
+    `question_group` VARCHAR(64) NULL,
+    `question_details` TEXT NULL,
+    `question_profession` VARCHAR(128) NULL,
+    `question_role` VARCHAR(50) NULL,
+    `mapped_cluster_name` VARCHAR(255) NULL,
+    `mapped_cluster_group` VARCHAR(64) NULL,
+    `mapped_ward` VARCHAR(255) NULL,
+    `mapped_main_icd_name` TEXT NULL,
+    `doctor_code_in_master` TINYINT NOT NULL DEFAULT 0,
     `loaded_at_utc` DATETIME(6) NOT NULL,
     PRIMARY KEY (`spro_id`, `case_num`, `year_month`),
     INDEX `idx_enriched_period_role` (`year_month`, `role`),
@@ -191,11 +202,15 @@ INSERT INTO `{table}` (
     `hnan_year_month`, `hn`, `an`, `adm_datetime`, `discharge_datetime`,
     `doctor_code`, `main_icd`, `icd_cm_code1`, `patient_type`,
     `nationality`, `discharge_ward_name`, `trauma`, `los`,
-    `count_complete`, `auditor_error`, `loaded_at_utc`
+    `count_complete`, `auditor_error`, `question_doc_num`, `question_name`,
+    `question_group`, `question_details`, `question_profession`, `question_role`,
+    `mapped_cluster_name`, `mapped_cluster_group`, `mapped_ward`,
+    `mapped_main_icd_name`, `doctor_code_in_master`, `loaded_at_utc`
 ) VALUES (
     %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
     %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-    %s, %s, %s, %s, %s
+    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+    %s, %s, %s, %s, %s, %s
 )
 """
 
@@ -224,7 +239,145 @@ ENRICHED_SOURCE_COLUMNS = [
     "LOS",
     "CountComplete",
     "AuditorError",
+    "QuestionDocNum",
+    "QuestionName",
+    "QuestionGroup",
+    "QuestionDetails",
+    "QuestionProfession",
+    "QuestionRole",
+    "MappedClusterName",
+    "MappedClusterGroup",
+    "MappedWard",
+    "MappedMainICDName",
+    "DoctorCodeInMaster",
 ]
+
+
+QUESTION_DIM_CREATE_SQL = """
+CREATE TABLE `{table}` (
+    `spro_id` VARCHAR(191) NOT NULL,
+    `doc_num` VARCHAR(128) NULL,
+    `question_name` TEXT NULL,
+    `audit_group` VARCHAR(64) NULL,
+    `question_details` TEXT NULL,
+    `profession` VARCHAR(128) NULL,
+    `role_name` VARCHAR(50) NULL,
+    `loaded_at_utc` DATETIME(6) NOT NULL,
+    PRIMARY KEY (`spro_id`),
+    INDEX `idx_question_role` (`role_name`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+"""
+
+QUESTION_DIM_INSERT_SQL = """
+INSERT INTO `{table}` (
+    `spro_id`, `doc_num`, `question_name`, `audit_group`,
+    `question_details`, `profession`, `role_name`, `loaded_at_utc`
+) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+"""
+
+CLUSTER_DIM_CREATE_SQL = """
+CREATE TABLE `{table}` (
+    `cluster_id` VARCHAR(191) NOT NULL,
+    `cluster_name` VARCHAR(255) NULL,
+    `cluster_group` VARCHAR(64) NULL,
+    `loaded_at_utc` DATETIME(6) NOT NULL,
+    PRIMARY KEY (`cluster_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+"""
+
+CLUSTER_DIM_INSERT_SQL = """
+INSERT INTO `{table}` (`cluster_id`, `cluster_name`, `cluster_group`, `loaded_at_utc`)
+VALUES (%s, %s, %s, %s)
+"""
+
+WARD_DIM_CREATE_SQL = """
+CREATE TABLE `{table}` (
+    `discharge_ward_name` VARCHAR(255) NOT NULL,
+    `mapped_ward` VARCHAR(255) NULL,
+    `loaded_at_utc` DATETIME(6) NOT NULL,
+    PRIMARY KEY (`discharge_ward_name`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+"""
+
+WARD_DIM_INSERT_SQL = """
+INSERT INTO `{table}` (`discharge_ward_name`, `mapped_ward`, `loaded_at_utc`)
+VALUES (%s, %s, %s)
+"""
+
+ICD_DIM_CREATE_SQL = """
+CREATE TABLE `{table}` (
+    `main_icd` VARCHAR(64) NOT NULL,
+    `main_icd_name` TEXT NULL,
+    `loaded_at_utc` DATETIME(6) NOT NULL,
+    PRIMARY KEY (`main_icd`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+"""
+
+ICD_DIM_INSERT_SQL = """
+INSERT INTO `{table}` (`main_icd`, `main_icd_name`, `loaded_at_utc`)
+VALUES (%s, %s, %s)
+"""
+
+DOCTOR_DIM_CREATE_SQL = """
+CREATE TABLE `{table}` (
+    `doctor_code` VARCHAR(64) NOT NULL,
+    `in_master` TINYINT NOT NULL,
+    `loaded_at_utc` DATETIME(6) NOT NULL,
+    PRIMARY KEY (`doctor_code`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+"""
+
+DOCTOR_DIM_INSERT_SQL = """
+INSERT INTO `{table}` (`doctor_code`, `in_master`, `loaded_at_utc`)
+VALUES (%s, %s, %s)
+"""
+
+COMPLIANCE_CREATE_SQL = """
+CREATE TABLE `{table}` (
+    `role_name` VARCHAR(50) NOT NULL,
+    `year_month` VARCHAR(20) NOT NULL,
+    `total_score` DECIMAL(18,4) NULL,
+    `total_audit_items` BIGINT NOT NULL,
+    `scored_items` BIGINT NOT NULL,
+    `unscored_items` BIGINT NOT NULL,
+    `compliance_rate` DECIMAL(12,8) NULL,
+    `loaded_at_utc` DATETIME(6) NOT NULL,
+    PRIMARY KEY (`role_name`, `year_month`),
+    INDEX `idx_compliance_period` (`year_month`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+"""
+
+COMPLIANCE_INSERT_SQL = """
+INSERT INTO `{table}` (
+    `role_name`, `year_month`, `total_score`, `total_audit_items`,
+    `scored_items`, `unscored_items`, `compliance_rate`, `loaded_at_utc`
+) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+"""
+
+CLUSTER_COMPLIANCE_CREATE_SQL = """
+CREATE TABLE `{table}` (
+    `cluster_id` VARCHAR(191) NOT NULL,
+    `cluster_name` VARCHAR(255) NOT NULL,
+    `year_month` VARCHAR(20) NOT NULL,
+    `total_score` DECIMAL(18,4) NULL,
+    `total_audit_items` BIGINT NOT NULL,
+    `scored_items` BIGINT NOT NULL,
+    `unscored_items` BIGINT NOT NULL,
+    `compliance_rate` DECIMAL(12,8) NULL,
+    `loaded_at_utc` DATETIME(6) NOT NULL,
+    PRIMARY KEY (`cluster_id`, `year_month`),
+    INDEX `idx_cluster_compliance_name` (`cluster_name`),
+    INDEX `idx_cluster_compliance_period` (`year_month`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+"""
+
+CLUSTER_COMPLIANCE_INSERT_SQL = """
+INSERT INTO `{table}` (
+    `cluster_id`, `cluster_name`, `year_month`, `total_score`,
+    `total_audit_items`, `scored_items`, `unscored_items`,
+    `compliance_rate`, `loaded_at_utc`
+) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+"""
 
 
 def _load_run_metadata(connection, report: dict[str, Any], output_dir: Path) -> None:
@@ -381,8 +534,24 @@ def load_mra_to_mariadb(output_dir: str | Path) -> dict[str, Any]:
     output_dir = Path(output_dir)
     fact_path = output_dir / "audit_fact.parquet"
     enriched_path = output_dir / "audit_enriched.parquet"
+    compliance_path = output_dir / "compliance_by_profession.parquet"
+    cluster_compliance_path = output_dir / "compliance_by_cluster.parquet"
     report_path = output_dir / "quality_report.json"
-    for required_path in (fact_path, enriched_path, report_path):
+    dimension_paths = {
+        "question": output_dir / "moi_question_dimension.parquet",
+        "cluster": output_dir / "moi_cluster_dimension.parquet",
+        "ward": output_dir / "moi_ward_dimension.parquet",
+        "icd10": output_dir / "moi_icd10_dimension.parquet",
+        "doctor": output_dir / "moi_doctor_code_dimension.parquet",
+    }
+    for required_path in (
+        fact_path,
+        enriched_path,
+        compliance_path,
+        cluster_compliance_path,
+        report_path,
+        *dimension_paths.values(),
+    ):
         if not required_path.is_file():
             raise FileNotFoundError(f"Required MariaDB input not found: {required_path}")
 
@@ -396,6 +565,11 @@ def load_mra_to_mariadb(output_dir: str | Path) -> dict[str, Any]:
 
     fact = pd.read_parquet(fact_path)
     enriched = pd.read_parquet(enriched_path)
+    compliance = pd.read_parquet(compliance_path)
+    cluster_compliance = pd.read_parquet(cluster_compliance_path)
+    dimensions = {
+        name: pd.read_parquet(path) for name, path in dimension_paths.items()
+    }
     report = json.loads(report_path.read_text(encoding="utf-8"))
     loaded_at = datetime.now(timezone.utc).replace(tzinfo=None)
 
@@ -427,6 +601,143 @@ def load_mra_to_mariadb(output_dir: str | Path) -> dict[str, Any]:
             ENRICHED_INSERT_SQL,
             _iter_rows(enriched, ENRICHED_SOURCE_COLUMNS, loaded_at),
         )
+        question_rows = _load_snapshot(
+            connection,
+            database,
+            "mra_question_dimension",
+            QUESTION_DIM_CREATE_SQL,
+            QUESTION_DIM_INSERT_SQL,
+            _iter_rows(
+                dimensions["question"],
+                ["SProID", "DocNum", "DocName", "Group", "Details", "Profession", "Role"],
+                loaded_at,
+            ),
+        )
+        cluster_rows = _load_snapshot(
+            connection,
+            database,
+            "mra_cluster_dimension",
+            CLUSTER_DIM_CREATE_SQL,
+            CLUSTER_DIM_INSERT_SQL,
+            _iter_rows(
+                dimensions["cluster"],
+                ["ClusterID", "MappedClusterName", "MappedClusterGroup"],
+                loaded_at,
+            ),
+        )
+        ward_rows = _load_snapshot(
+            connection,
+            database,
+            "mra_ward_dimension",
+            WARD_DIM_CREATE_SQL,
+            WARD_DIM_INSERT_SQL,
+            _iter_rows(
+                dimensions["ward"],
+                ["DischargeWardName", "MappedWard"],
+                loaded_at,
+            ),
+        )
+        icd_rows = _load_snapshot(
+            connection,
+            database,
+            "mra_icd10_dimension",
+            ICD_DIM_CREATE_SQL,
+            ICD_DIM_INSERT_SQL,
+            _iter_rows(
+                dimensions["icd10"],
+                ["MainICD", "MappedMainICDName"],
+                loaded_at,
+            ),
+        )
+        doctor_rows = _load_snapshot(
+            connection,
+            database,
+            "mra_doctor_code_dimension",
+            DOCTOR_DIM_CREATE_SQL,
+            DOCTOR_DIM_INSERT_SQL,
+            _iter_rows(
+                dimensions["doctor"],
+                ["DoctorCode", "DoctorCodeInMaster"],
+                loaded_at,
+            ),
+        )
+        compliance_rows = _load_snapshot(
+            connection,
+            database,
+            "mra_compliance_by_profession",
+            COMPLIANCE_CREATE_SQL,
+            COMPLIANCE_INSERT_SQL,
+            _iter_rows(
+                compliance,
+                [
+                    "Role",
+                    "Year-Month",
+                    "total_score",
+                    "total_audit_items",
+                    "scored_items",
+                    "unscored_items",
+                    "compliance_rate",
+                ],
+                loaded_at,
+            ),
+        )
+        cluster_compliance_rows = _load_snapshot(
+            connection,
+            database,
+            "mra_compliance_by_cluster",
+            CLUSTER_COMPLIANCE_CREATE_SQL,
+            CLUSTER_COMPLIANCE_INSERT_SQL,
+            _iter_rows(
+                cluster_compliance,
+                [
+                    "ClusterID",
+                    "SCShortName",
+                    "Year-Month",
+                    "total_score",
+                    "total_audit_items",
+                    "scored_items",
+                    "unscored_items",
+                    "compliance_rate",
+                ],
+                loaded_at,
+            ),
+        )
+        cursor = connection.cursor()
+        try:
+            cursor.execute(
+                """
+                CREATE OR REPLACE VIEW `mra_compliance_by_profession_overall` AS
+                SELECT
+                    `role_name`,
+                    SUM(`total_score`) AS `total_score`,
+                    SUM(`total_audit_items`) AS `total_audit_items`,
+                    SUM(`scored_items`) AS `scored_items`,
+                    SUM(`unscored_items`) AS `unscored_items`,
+                    SUM(`total_score`) / NULLIF(SUM(`total_audit_items`), 0)
+                        AS `compliance_rate`
+                FROM `mra_compliance_by_profession`
+                GROUP BY `role_name`
+                """
+            )
+            cursor.execute(
+                """
+                CREATE OR REPLACE VIEW `mra_compliance_by_cluster_overall` AS
+                SELECT
+                    `cluster_id`,
+                    MAX(`cluster_name`) AS `cluster_name`,
+                    SUM(`total_score`) AS `total_score`,
+                    SUM(`total_audit_items`) AS `total_audit_items`,
+                    SUM(`scored_items`) AS `scored_items`,
+                    SUM(`unscored_items`) AS `unscored_items`,
+                    SUM(`total_score`) / NULLIF(SUM(`total_audit_items`), 0)
+                        AS `compliance_rate`
+                FROM `mra_compliance_by_cluster`
+                GROUP BY `cluster_id`
+                """
+            )
+            connection.commit()
+        finally:
+            cursor.close()
         _load_run_metadata(connection, report, output_dir)
 
         cursor = connection.cursor()
@@ -450,6 +761,13 @@ def load_mra_to_mariadb(output_dir: str | Path) -> dict[str, Any]:
             "tables": {
                 "mra_audit_fact": fact_rows,
                 "mra_audit_enriched": enriched_rows,
+                "mra_question_dimension": question_rows,
+                "mra_cluster_dimension": cluster_rows,
+                "mra_ward_dimension": ward_rows,
+                "mra_icd10_dimension": icd_rows,
+                "mra_doctor_code_dimension": doctor_rows,
+                "mra_compliance_by_profession": compliance_rows,
+                "mra_compliance_by_cluster": cluster_compliance_rows,
                 "mra_quality_checks": len(report["checks"]),
             },
             "loaded_at_utc": loaded_at.replace(tzinfo=timezone.utc).isoformat(),

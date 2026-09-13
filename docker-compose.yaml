@@ -73,6 +73,14 @@ x-airflow-common:
     N8N_WEBHOOK_URL: ${N8N_WEBHOOK_URL:-http://n8n:5678/webhook/mra-agentic-quality}
     # Keep false until a Google Gemini credential is selected in the n8n workflow.
     N8N_AI_ENABLED: ${N8N_AI_ENABLED:-false}
+    # Eight audit workbooks are mounted read-only from the host OneDrive folder.
+    MRA_ONEDRIVE_INPUT_DIR: /opt/airflow/onedrive_input
+    # The patient-level MRAuditLists reference remains in the protected local input.
+    MRA_REFERENCE_INPUT_DIR: /opt/airflow/data/input
+    # Three MOI mapping workbooks are mounted read-only and snapshotted per DAG run.
+    MRA_MOI_ONEDRIVE_INPUT_DIR: /opt/airflow/moi_reference_input
+    # Cluster name master is mounted separately and joined by ClusterID.
+    MRA_SUBCLUSTER_ONEDRIVE_INPUT_DIR: /opt/airflow/subcluster_reference_input
     # Project analytical database. Airflow uses the Docker service name.
     MRA_DB_HOST: ${MRA_DB_HOST:-mariadb}
     MRA_DB_PORT: ${MRA_DB_PORT:-3306}
@@ -90,6 +98,18 @@ x-airflow-common:
     - ${AIRFLOW_PROJ_DIR:-.}/code:/opt/airflow/code
     - ${AIRFLOW_PROJ_DIR:-.}/data:/opt/airflow/data
     - ${AIRFLOW_PROJ_DIR:-.}/data/output:/opt/airflow/outputs
+    - type: bind
+      source: ${MRA_ONEDRIVE_HOST_DIR:-./data/input}
+      target: /opt/airflow/onedrive_input
+      read_only: true
+    - type: bind
+      source: ${MRA_MOI_ONEDRIVE_HOST_DIR:-./data/input}
+      target: /opt/airflow/moi_reference_input
+      read_only: true
+    - type: bind
+      source: ${MRA_SUBCLUSTER_ONEDRIVE_HOST_DIR:-./data/input}
+      target: /opt/airflow/subcluster_reference_input
+      read_only: true
   user: "${AIRFLOW_UID:-50000}:0"
   depends_on:
     &airflow-common-depends-on

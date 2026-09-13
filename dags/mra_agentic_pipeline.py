@@ -12,8 +12,8 @@ if CODE_DIR not in sys.path:
     sys.path.insert(0, CODE_DIR)
 
 # Run every day at 10:00 in the DAG timezone (Asia/Bangkok).
-DAG_SCHEDULE = "0 10 * * *"
-LAST_SCHEDULED_RUN = pendulum.datetime(2026, 9, 15, 10, 0, tz="Asia/Bangkok")
+DAG_SCHEDULE = "0 8 * * 1"
+LAST_SCHEDULED_RUN = pendulum.datetime(2026, 12, 28, 8, 0, tz="Asia/Bangkok")
 
 
 DEFAULT_ARGS = {
@@ -59,6 +59,18 @@ with DAG(
 ) as dag:
     start = EmptyOperator(task_id="start")
 
+    sync_onedrive = PythonOperator(
+        task_id="sync_onedrive_inputs",
+        python_callable=run_stage,
+        op_kwargs={"function_name": "sync_onedrive_inputs"},
+    )
+
+    sync_moi_references = PythonOperator(
+        task_id="sync_moi_reference_inputs",
+        python_callable=run_stage,
+        op_kwargs={"function_name": "sync_moi_reference_inputs"},
+    )
+
     check_files = PythonOperator(
         task_id="check_input_files",
         python_callable=run_stage,
@@ -87,10 +99,28 @@ with DAG(
         op_kwargs={"function_name": "validate_data_quality"},
     )
 
+    build_moi_dimensions = PythonOperator(
+        task_id="build_moi_reference_dimensions",
+        python_callable=run_stage,
+        op_kwargs={"function_name": "build_moi_reference_dimensions"},
+    )
+
     join = PythonOperator(
         task_id="join_mraudit_lists",
         python_callable=run_stage,
         op_kwargs={"function_name": "join_mraudit_lists"},
+    )
+
+    map_moi = PythonOperator(
+        task_id="map_moi_references",
+        python_callable=run_stage,
+        op_kwargs={"function_name": "map_moi_references"},
+    )
+
+    reconcile_ha = PythonOperator(
+        task_id="reconcile_ha_report",
+        python_callable=run_stage,
+        op_kwargs={"function_name": "reconcile_ha_report"},
     )
 
     compare = PythonOperator(
@@ -143,9 +173,13 @@ with DAG(
 
     end = EmptyOperator(task_id="end")
 
-    start >> check_files
+    start >> [sync_onedrive, sync_moi_references]
+    [sync_onedrive, sync_moi_references] >> check_files
     check_files >> extract_tasks
+    check_files >> build_moi_dimensions
     extract_tasks >> combine
-    combine >> validate >> join >> compare
-    compare >> quality_report >> gate >> load
+    combine >> validate >> join
+    [join, build_moi_dimensions] >> map_moi >> reconcile_ha
+    join >> compare
+    [reconcile_ha, compare] >> quality_report >> gate >> load
     load >> load_mariadb >> agent_payload >> n8n >> human_review >> end

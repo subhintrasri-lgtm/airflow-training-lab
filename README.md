@@ -26,6 +26,67 @@ docker compose up -d
 
 ```
 
+## การอ่านไฟล์ MRA จาก OneDrive อัตโนมัติ
+
+กำหนด `MRA_ONEDRIVE_HOST_DIR` ในไฟล์ `.env` ให้ชี้ไปยังโฟลเดอร์
+OneDrive ที่มีไฟล์ Audit ทั้ง 8 ไฟล์ แล้วสร้าง Airflow containers ใหม่ด้วย
+`docker compose up -d --force-recreate airflow-webserver airflow-scheduler airflow-worker airflow-triggerer`
+
+โฟลเดอร์ OneDrive ถูก mount เข้า Airflow แบบ read-only เท่านั้น Task
+`sync_onedrive_inputs` จะคัดลอกทั้ง 8 ไฟล์ไปยัง snapshot ภายใน
+`data/staging/mra_agentic/source_snapshot` และตรวจ SHA-256 ก่อนเริ่ม Extract
+หากไฟล์ขาดหรือ OneDrive เปลี่ยนไฟล์ระหว่างคัดลอก Task จะหยุดโดยไม่ใช้ snapshot
+ที่ไม่สมบูรณ์
+
+ไฟล์ `ResultMRauditJCIHA.xlsx` ยังคงอ่านจาก `data/input` และข้อมูลต้นฉบับ,
+staging, output รวมถึงไฟล์ `.env` ต้องไม่ถูก commit ขึ้น GitHub
+
+### Mapping กับไฟล์ MOI Report
+
+กำหนด `MRA_MOI_ONEDRIVE_HOST_DIR` ใน `.env` ให้ชี้ไปยังโฟลเดอร์ที่มีไฟล์ต่อไปนี้:
+
+- `NewAuditForm2025.xlsx` ใช้ Mapping รหัสคำถามด้วย `SProID`
+- `MRCode.xlsx` ใช้ Mapping `ClusterID`, `DischargeWardName`, `MainICD` และตรวจการมีอยู่ของ `DoctorCode`
+- `SubClusterID.xlsb` ใช้ Mapping `ClusterID` และกำหนดชื่อ Cluster จาก `SCShortName`
+- `HAReportJan2024-May2025.xlsm` ใช้ตรวจเทียบจำนวน encounter ของ IPD (`HN+AN`) และ OPD (`HN+VisitDate`) เฉพาะช่วงเวลาเดียวกัน
+
+Airflow mount โฟลเดอร์นี้แบบ read-only และ Task `sync_moi_reference_inputs`
+จะสร้าง snapshot พร้อมตรวจ SHA-256 ก่อน Mapping ทุกครั้ง จากนั้น Task
+`build_moi_reference_dimensions`, `map_moi_references` และ `reconcile_ha_report`
+จะตรวจคีย์ซ้ำและบันทึก mapping coverage ใน Quality Report
+
+MariaDB จะได้รับตาราง snapshot เพิ่มเติม ได้แก่ `mra_question_dimension`,
+`mra_cluster_dimension`, `mra_ward_dimension`, `mra_icd10_dimension` และ
+`mra_doctor_code_dimension` ส่วน n8n/AI จะได้รับเฉพาะจำนวนและอัตราสรุป
+โดยไม่ส่ง HN, AN, ชื่อแพทย์ หรือ encounter key เข้า LLM
+
+ตาราง `mra_compliance_by_cluster` เก็บ Compliance ราย Cluster-รายเดือน และ View
+`mra_compliance_by_cluster_overall` รวมผลตาม Cluster ชื่อในผลลัพธ์ใช้ `SCShortName`
+จาก `SubClusterID.xlsb` การคำนวณใช้ `SUM(Value) / COUNTROWS(MRA Data)` เช่นเดียวกับ
+Power BI ส่วน n8n ได้รับ `compliance_by_cluster` และจุดคะแนนต่ำสูงสุด 10 รายการต่อ
+Cluster ใน `cluster_improvement_areas` เพื่อใช้ตอบคำถามด้านการปรับปรุงแบบ Aggregate
+
+### Power BI และ Compliance rate
+
+Power BI และ n8n ใช้นิยามเดียวกันคือ
+`Compliance rate = SUM(Value) / COUNTROWS(MRA Data)` โดยห้ามนำ rate ของแต่ละกลุ่ม
+มาเฉลี่ยตรง ๆ ตาราง `mra_compliance_by_profession` เก็บผลรายวิชาชีพ-รายเดือน
+และ View `mra_compliance_by_profession_overall` รวมผลตามวิชาชีพสำหรับ Power BI
+
+Power BI Desktop บนเครื่อง Host เชื่อม MariaDB ที่ `localhost:3308` และเลือกตาราง/View
+ดังกล่าวได้ ส่วน n8n อ่านข้อมูลเดียวกันจาก `agent_payload.json` ในหัวข้อ
+`compliance_by_profession` และ `compliance_by_profession_period` โดยไม่มีข้อมูลผู้ป่วย
+
+Airflow สร้างกราฟแท่งแนวนอนจากข้อมูล Aggregate เดียวกันไว้ที่
+`data/agent/compliance_by_profession.svg` และ n8n ให้บริการกราฟภายในเครื่องที่
+`http://localhost:5678/webhook/mra-compliance-chart` เมื่อผู้ใช้ถามหา “กราฟ” หรือ
+“chart” คำตอบจะแสดงทั้งกราฟ ลิงก์เปิดภาพขนาดเต็ม และข้อความสรุปตัวเลข กราฟนี้ไม่ใช้
+บริการภายนอกและไม่มีข้อมูลระบุตัวผู้ป่วย
+
+กราฟราย Cluster อยู่ที่ `data/agent/compliance_by_cluster.svg` และเปิดผ่าน
+`http://localhost:5678/webhook/mra-cluster-compliance-chart` ภายใน n8n Workflow
+เดียวกัน ชื่อ Cluster บนกราฟใช้ `SCShortName` และแสดง `ClusterID` กำกับ
+
 
 4. **เปิด Airflow Web UI:**
 1. รอประมาณ 30–60 วินาที จะมี Popup แจ้งเตือนพอร์ต **8080** เด้งขึ้นมามุมขวาล่าง ให้คลิก **Open in Browser** (หรือไปที่แท็บ **PORTS** ด้านล่าง แล้วคลิกไอคอนลูกโลกที่ Port `8080`)
